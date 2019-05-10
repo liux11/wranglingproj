@@ -1,0 +1,216 @@
+---
+title: "Final Project"
+author: "Xiaorui Liu"
+date: "May 6, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(purrr)
+library(magrittr)
+library(stringr)
+library(lubridate)
+
+```
+
+```{r, include=FALSE}
+
+library(boxoffice)
+
+#Scrape "The-Numbers" for the top 2000 highest grossing movies of all time for the release year
+top2k <- top_grossing(type = "worldwide", ranks = 1:2000)
+
+#Scrape "The-Numbers"" for the daily gross of all movies released in 2018 and create abbreviated title variable
+#to merge later.
+i_times = seq(as.Date("2018/1/1"), as.Date("2018/12/31"), "day")
+
+allmovies <- boxoffice(dates = i_times) %>%
+  mutate(abrev_ti = ifelse(str_length(movie) > 27, paste(substr(movie, 1, 27), ".", sep = ""), movie)) %>%
+  select(-c(movie))
+  
+```
+
+```{r}
+
+sample_toptitles <- top2k %>%
+  filter(year_released == 2018) %>%
+  arrange(desc(american_box_office)) %>%
+
+  #Isolate the top 50 movies released in 2018, exclude movies without official Reddit discussion threads.
+  head(59) %>%
+  filter(movie != "Peter Rabbit" & movie != "Fifty Shades Freed" & movie != "The House with a Clock in its Walls" & movie != "I Can Only Imagine" & movie != "Book Club" & movie != "Overboard" & movie != "Night School" & movie != "Sicario: Day of the Soldado" & movie != "I Feel Pretty") %>%
+  select(movie) %>%
+  
+  #Create abbreviated title variable for merge later.
+  mutate(abrev_ti = ifelse(str_length(movie) > 27, paste(substr(movie, 1, 27), ".", sep = ""), movie)) %>%
+  rename(full_ti = movie) %>%
+  
+  #Create official discussion variable to search reddit for official threads.
+  mutate(off_ti = ifelse(full_ti == "Dr. Seuss' The Grinch", "Official Discussion The Grinch", paste("Official Discussion", gsub("[^[:alnum:], ]+", " ", full_ti), sep=" ")))
+
+
+#Tweak a few official discussion variable observations so official discussion thread can be found as the first search object.
+sample_toptitles$off_ti <- str_replace(sample_toptitles$off_ti, "3D", "")
+sample_toptitles$off_ti <- str_replace(sample_toptitles$off_ti, "Official Discussion Jurassic", "Official Jurassic")
+
+#Merge onto daily grossing movie data by abbreviated title, and keep only the first 7 days after release.
+sample_firstweek <- sample_toptitles %>%
+  left_join(allmovies, by ="abrev_ti") %>%
+  filter(days >= 1 & days <= 7)
+
+head(sample_firstweek)
+
+```
+
+```{r, include=FALSE}
+
+library(RedditExtractoR)
+library(rlist)
+
+top50_off_urls <- vector("character", length(sample_toptitles[,1]))
+
+#Search Reddit for all movies in the top 50 of 2018 with official discussion threads
+for (i in 1:length(sample_toptitles[,1])) {
+  top50_off_urls[[i]] <- reddit_urls(search_terms = sample_toptitles[,3][i], subreddit = "movies")[["URL"]][1]
+}
+
+#Extract data from all official discussion threads
+first_dates <- dmy(reddit_content(URL = top50_off_urls[[1]])$comm_date)
+
+first_mov <- rep(sample_toptitles[1,1], length(first_dates))
+
+sorted_first <- data.frame(date = as.Date(first_dates, format = "%Y %m %d"), full_ti = first_mov) %>%
+  group_by(date)
+
+uni_dates <- summarise(sorted_first, n = n())
+
+top50_content <- data.frame(full_ti = sample_toptitles[1,1], uni_dates)
+
+for (i in 2:length(sample_toptitles[,1])) {
+  dates <- dmy(reddit_content(URL = top50_off_urls[[i]])$comm_date)
+  mov <- rep(sample_toptitles[i,1], length(dates))
+  sorted <- data.frame(date = as.Date(dates, format = "%Y %m %d"), full_ti = mov) %>%
+    group_by(date)
+  uni_dates <- summarise(sorted, n = n())
+  current_full <- data.frame(full_ti = sample_toptitles[i,1], uni_dates)
+  top50_content <- rbind(top50_content, current_full)
+}
+
+sample_firstweek <- sample_firstweek %>%
+  left_join(top50_content, by =c("full_ti", "date"))
+
+```
+
+```{r, include=FALSE}
+
+#Only include top 27 movies with accessible number of posts
+sample_firstweek$missing <- !is.na(sample_firstweek$n) 
+
+complete_top27 <- sample_firstweek %>%
+  group_by(full_ti) %>%
+  summarise(n = sum(missing)) %>%
+  filter(n > 3) %>%
+  select(full_ti) %>%
+  left_join(sample_firstweek, by = "full_ti") %>%
+  select(full_ti, distributor, gross, days, date, number_comments = n)
+
+complete_top27$number_comments <- ifelse(is.na(complete_top27$number_comments), 0, complete_top27$number_comments)
+
+write.csv(complete_top27,'complete_top27.csv')
+
+```
+```{r}
+
+complete_top27 <- read_csv('complete_top27.csv')
+
+head(complete_top27)
+
+```
+
+```{r}
+
+distributors <- complete_top27 %>%
+  select(full_ti, distributor) %>%
+  group_by(full_ti, distributor) %>%
+  summarise(n = n()) %>%
+  select(full_ti, distributor) %>%
+  group_by(distributor) %>%
+  summarise(n = n())
+
+#Plot distributors of the 27 movies
+ggplot(distributors, aes(distributor, n, fill=distributor)) + geom_bar(stat = "identity") + theme(axis.text.x=element_text(size=rel(0.95), angle=30)) + ggtitle('Number of movies by distributor') + theme(plot.title = element_text(hjust = 0.5)) + xlab("Distributor") + ylab("Frequency")
+
+```
+
+```{r}
+
+comments_by_day <- complete_top27 %>%
+  group_by(days) %>%
+  summarise(total_comments = sum(number_comments))
+
+#Plots comments by release
+ggplot(comments_by_day, aes(days, total_comments)) + geom_line() + ggtitle('Total number of comments by days after release') + theme(plot.title = element_text(hjust = 0.5)) + xlab("Days after release") + ylab("Total # of comments")
+
+```
+
+```{r}
+
+distr_comments <- complete_top27 %>%
+  group_by(distributor, days) %>%
+  summarise(total_comments = sum(number_comments))
+
+#Plot comments by release split into distributors
+ggplot(distr_comments, aes(days, total_comments, color = distributor)) + geom_line() + ggtitle('Total number of comments by days after release') + theme(plot.title = element_text(hjust = 0.5)) + xlab("Days after release") + ylab("Total # of comments")
+
+```
+
+```{r}
+
+library(reshape2)
+
+get_lower_tri<-function(cormat){
+  cormat[upper.tri(cormat)] <- NA
+  return(cormat)
+}
+
+corr_mat <- complete_top27 %>%
+  select(gross, days, number_comments)
+
+corr_mat <- round(cor(corr_mat), 2) %>%
+  get_lower_tri %>%
+  melt()
+
+#Plot correlation matrix
+ggplot(corr_mat, aes(Var1, Var2, fill = value)) + geom_tile(color = 'white') + scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0, limit = c(-1,1), space = "Lab", name="Pearson\nCorrelation") + theme_minimal() + theme(axis.text.x = element_text(angle = 45, vjust = 1, size = 12, hjust = 1)) +
+ coord_fixed() + xlab("") + ylab("")
+
+```
+
+```{r}
+
+linear_model <- lm(number_comments ~ gross + days, data = complete_top27)
+
+linear_model
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
